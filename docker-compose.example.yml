@@ -1,0 +1,20 @@
+services:
+  servant:
+    image: servant:0.1.0
+    container_name: servant
+    restart: unless-stopped
+    ports:
+      - "6060:6060"
+    environment:
+      LOG_LEVEL: "warn"
+      TIME_SOURCE: "browser"
+      TIME_FORMAT: "24h"
+      TZ: "UTC"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6060/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
