@@ -1,0 +1,75 @@
+<p align="center">
+	<img src="./static/screenshot.png" alt="Screenshot" />
+</p>
+
+# ServAnt - Containers served to you.
+
+**ServAnt** is a lightweight, web-based Docker container dashboard that provides real-time monitoring and management of your containers. Built with Express and Dockerode, it offers a clean interface to view container status, resource usage, and basic metrics—all through a simple, responsive UI.
+
+### Demo
+You can access demo here: https://panonim.github.io/servant-demo/. 
+
+# Installation 
+Create project folder and grab necessary files from the repository. 
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/Panonim/servant/main/docker.example.yml
+```
+
+### Authentication
+
+If `API_KEY` is set in production mode (`NODE_ENV=production`), API requests must include an `Authorization` header:
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Configuration
+
+Configure ServAnt by editing the `.env` file or setting environment variables in `docker-compose.yml`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `6060` | Port the server listens on |
+| `LOG_LEVEL` | `info` | Logging verbosity: `error`, `warn`, `info`, `debug` |
+| `TIME_SOURCE` | `browser` | Time source for timestamps: `browser` (client timezone) or `local` (server timezone) |
+| `TIME_FORMAT` | `24h` | Time format: `24h` or `12h` |
+| `TZ` | `UTC` | Timezone for server-side timestamps (e.g., `America/New_York`, `Europe/London`) |
+| `USE_HTTPS` | `true` | Enable HTTPS-specific security features (set to `false` for local HTTP development) |
+| `API_KEY` | (none) | Optional API key for authentication (Bearer token) |
+| `RATE_LIMIT` | `120` | Maximum requests per window |
+| `RATE_WINDOW_MS` | `60000` | Rate limiting window in milliseconds (default: 1 minute) |
+| `TRUST_PROXY` | `false` | Set to `true` if behind a reverse proxy |
+
+# Star History
+
+<a href="https://www.star-history.com/#panonim/servant&type=date&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=panonim/servant&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=panonim/servant&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=panonim/servant&type=date&legend=bottom-right" />
+ </picture>
+</a>
+
+## API Endpoints
+
+ServAnt exposes the following API paths:
+
+### Public Endpoints
+- **`GET /healthz`** - Health check endpoint (returns `ok` as plain text)
+- **`GET /`** - Main dashboard (serves the web UI)
+
+### Docker API Endpoints
+
+All Docker API endpoints are prefixed with `/docker` and are protected by rate limiting and optional API key authentication.
+
+- **`GET /docker/containers/json?all=1`** - List all containers
+  - Query params:
+    - `all` (optional): Set to `1` or `true` to show all containers (including stopped ones)
+  - Returns: JSON array of container objects with filtered fields (Id, Names, Image, ImageID, Command, Created, State, Status, Ports)
+
+- **`GET /docker/containers/:id/stats?stream=1`** - Get container resource statistics
+  - Path params:
+    - `id`: Container ID (12-64 hex characters)
+  - Query params:
+    - `stream` (optional): Set to `1` for streaming stats (NDJSON format), or `0` for a single snapshot
+  - Returns: Container statistics including CPU, memory, and network usage
+  - Note: Streaming connections have a maximum duration of 5 minutes (configurable via `STREAM_MAX_MS`)

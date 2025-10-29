@@ -321,7 +321,8 @@
       display: grid; 
       grid-template-columns: 1.2fr 1fr 0.8fr 1.4fr 1.2fr; 
       gap: 8px; 
-      align-items: center; 
+      /* Align baselines so text like CPU/Mem lines up with the image link */
+      align-items: baseline; 
       padding: 10px 0 0; 
     }
     .col { 
@@ -334,14 +335,16 @@
     .image { 
       display: flex; 
       gap: 8px; 
-      align-items: center; 
+      /* Use baseline so text aligns precisely with adjacent link */
+      align-items: baseline; 
       min-width: 0;
     }
     .stats-col {
       display: flex;
       flex-direction: row;
       gap: 12px;
-      align-items: center;
+      /* Baseline alignment to match image link baseline */
+      align-items: baseline;
       justify-content: flex-start;
       min-width: 0;
     }
@@ -405,6 +408,8 @@
       gap: 6px; 
       justify-content: flex-end; 
       flex-wrap: wrap;
+      /* Keep actions visually centered when the row uses baseline alignment */
+      align-self: center;
     }
     .btn.small { 
       padding: 6px 10px; 
@@ -502,12 +507,10 @@
       gap: 8px;
     }
 
-    /* Large tablets and small desktops */
     @media (max-width: 1200px) {
       .wrap { max-width: 100%; padding: 12px; }
     }
 
-    /* Large desktop view - proper layout */
     @media (min-width: 1081px) {
       .titlebar {
         display: flex;
@@ -543,7 +546,6 @@
       }
     }
 
-    /* Medium desktop screens - centered double-stack layout (logo + search top, controls bottom) */
     @media (max-width: 1080px) and (min-width: 769px) {
       .titlebar {
         display: flex;
@@ -592,7 +594,6 @@
       }
     }
 
-    /* Mobile-first: Show hamburger menu, hide regular controls */
     @media (max-width: 768px) {
       .controls {
         display: none !important;
@@ -642,7 +643,6 @@
       }
     }
 
-    /* Make mobile menu buttons not stretch to full width */
     .mobile-menu .input {
       width: 90%;
     }
@@ -661,7 +661,6 @@
       display: inline-flex;
     }
     
-    /* Mobile menu button group for theme, auto refresh, and refresh */
     .mobile-menu-button-group {
       display: flex;
       gap: 8px;
@@ -674,7 +673,6 @@
       min-width: 0;
     }
 
-    /* Tablets */
     @media (max-width: 940px) {
       .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .grid { grid-template-columns: 1.2fr 1fr 1.2fr; }
@@ -683,7 +681,6 @@
       .hide-md { display: none; }
     }
 
-    /* Better wrapping for larger devices */
     @media (min-width: 769px) {
       .id {
         overflow: hidden;
@@ -693,7 +690,6 @@
       }
     }
 
-    /* Large mobile devices */
     @media (max-width: 768px) {
       .wrap { padding: 8px; }
       .stats { 
@@ -708,7 +704,6 @@
       .chips { justify-content: flex-start; }
     }
 
-    /* Small mobile devices */
     @media (max-width: 560px) {
       .stats { 
         grid-template-columns: repeat(2, minmax(0,1fr)); 
@@ -762,7 +757,6 @@
       }
     }
 
-    /* Extra small devices */
     @media (max-width: 400px) {
       .wrap { padding: 6px; }
       .card { padding: 8px; }
@@ -813,12 +807,10 @@
   :root[data-theme="light"] .brand .logo {
       background-image: url('./assets/logo-dark.svg');
     }
-    /* Smooth theme transitions */
     html, body, header, .card, .stat, .input, .select, .btn, .chip, .logo {
       transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, background-image 0.3s ease;
     }
     
-    /* Enhanced animations */
     .card {
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
@@ -870,7 +862,6 @@
                   border-color 0.2s ease;
     }
 
-    /* Icon visibility fix */
     #toggleTheme img {
       filter: invert(100%);
       transition: filter 0.3s ease, transform 0.3s ease;
@@ -880,7 +871,6 @@
       filter: invert(0%);
     }
     
-    /* GitHub link styling */
     .github-link {
       display: inline-flex;
       align-items: center;
@@ -911,7 +901,6 @@
       transform: scale(1.1);
     }
     
-    /* Refresh icon styling */
     #refresh img {
       filter: invert(100%);
       transition: filter 0.3s ease, transform 0.3s ease;
@@ -930,7 +919,6 @@
       filter: invert(27%) sepia(51%) saturate(2878%) hue-rotate(346deg) brightness(104%) contrast(97%);
     }
     
-    /* Refresh icon spin animation */
     #refresh.spinning img {
       animation: spin 1s linear;
       animation-iteration-count: 1;

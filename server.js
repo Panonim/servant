@@ -71,8 +71,27 @@ app.disable('x-powered-by');
 app.set('trust proxy', process.env.TRUST_PROXY || false);
 
 // Security headers - configured for same-origin operation
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", "'unsafe-inline'"], // 'unsafe-inline' for injected config
+  styleSrc: ["'self'", "'unsafe-inline'"],
+  imgSrc: ["'self'", "data:"],
+  connectSrc: ["'self'"],
+  fontSrc: ["'self'"],
+  objectSrc: ["'none'"],
+};
+
+// Only enable upgradeInsecureRequests in production with HTTPS
+if (process.env.NODE_ENV === 'production' && process.env.USE_HTTPS === 'true') {
+  cspDirectives.upgradeInsecureRequests = [];
+} else {
+  cspDirectives.upgradeInsecureRequests = null; // Disable for local HTTP development
+}
+
 app.use(helmet({
-  contentSecurityPolicy: false, // Allow loading resources in dev
+  contentSecurityPolicy: {
+    directives: cspDirectives,
+  },
   crossOriginEmbedderPolicy: false // Allow loading in iframe for dev
 }));
 
@@ -306,4 +325,40 @@ process.on('uncaughtException', (err) => {
 server.headersTimeout = 65_000;
 server.requestTimeout = 30_000;
 server.keepAliveTimeout = 60_000;
+
+// Track open connections
+const connections = new Set();
+server.on('connection', (socket) => {
+  connections.add(socket);
+  socket.on('close', () => connections.delete(socket));
+});
+
+const KA_MS = Number(process.env.KEEP_ALIVE_MS || 10_000);
+server.keepAliveTimeout = Math.min(server.keepAliveTimeout, KA_MS);
+
+function shutdown(signal) {
+  const graceMs = Number(process.env.SHUTDOWN_GRACE_MS || 1500);
+  logger.info(`${signal} received. Shutting down gracefully (<= ${graceMs}ms)...`);
+
+  // Stop accepting new connections
+  server.close((err) => {
+    if (err) {
+      logger.error('Error during server.close():', err);
+      process.exit(1);
+    }
+    logger.info('HTTP server closed cleanly. Exiting.');
+    process.exit(0);
+  });
+
+  // After a short grace period, force-destroy any lingering sockets
+  setTimeout(() => {
+    if (connections.size) logger.warn(`Force-closing ${connections.size} lingering connection(s)`);
+    for (const s of connections) {
+      try { s.destroy(); } catch {}
+    }
+  }, graceMs).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 

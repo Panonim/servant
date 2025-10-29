@@ -1,7 +1,9 @@
 node_modules
 npm-debug.log
+package-lock.json
 Dockerfile
 docker-compose.example.yml
 compose.yml
 .git
 .gitignore
+.env.example
