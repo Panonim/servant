@@ -1,6 +1,6 @@
 services:
   servant:
-    image: servant:0.1.0
+    image: ghcr.io/panonim/servant:latest
     container_name: servant
     restart: unless-stopped
     ports:
