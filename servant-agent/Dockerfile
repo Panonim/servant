@@ -21,7 +21,6 @@ EXPOSE 6061
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
   CMD curl -fsS http://localhost:6061/healthz || exit 1
 
-# Ensure PID 1 properly forwards signals and reaps zombies
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["tini", "--"]
 CMD ["node", "server.js"]
