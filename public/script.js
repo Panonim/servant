@@ -170,7 +170,6 @@
   let manualStatsControl = new Set(); // Track containers with manual stats control
 
   const elList = document.getElementById('list');
-  const elCount = document.getElementById('count');
   const elSearch = document.getElementById('search');
   const elAgentFilter = document.getElementById('agentFilter');
   const elStatus = document.getElementById('statusFilter');
@@ -489,7 +488,6 @@
     elStopped.textContent = stopped;
     elImages.textContent = images;
     elUpdated.textContent = timeNow();
-    elCount.textContent = `${containers.length} containers`;
   }
 
   function filtered() {

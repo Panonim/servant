@@ -8,7 +8,7 @@
 
 ## Two Versions Available
 
-- **ServAnt (Main)** - Interactive web dashboard with UI
+- **ServAnt (Main)** - Interactive web dashboard with UI. Note: Main version of servant already contains agent. 
 - **[ServAnt Agent](./servant-agent/)** - Headless API-only version with required token authentication for automation and remote monitoring
 
 ### Demo

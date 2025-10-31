@@ -963,3 +963,8 @@
     body.transitioning #toggleTheme img {
       transform: rotate(180deg);
     }
+    
+    /* Hide the bottom "X containers" text in the footer */
+    .footer #count {
+      display: none;
+    }
