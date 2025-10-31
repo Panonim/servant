@@ -7,13 +7,113 @@ import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import { readFile } from 'fs/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const docker = new Docker({
-  socketPath: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
-});
+// Load agents configuration
+// Always include the local agent (hardcoded)
+let agentsConfig = {
+  agents: {
+    local: {
+      type: 'socket',
+      socketPath: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock'
+    }
+  }
+};
+
+// Load remote agents from agents.json (optional)
+try {
+  const agentsFile = path.join(__dirname, 'agents.json');
+  const agentsData = await readFile(agentsFile, 'utf8');
+  // Replace environment variable placeholders
+  const replaced = agentsData.replace(/\$\{(\w+)\}/g, (_, varName) => process.env[varName] || '');
+  const remoteAgentsConfig = JSON.parse(replaced);
+  
+  // Merge remote agents with local agent
+  if (remoteAgentsConfig.agents) {
+    agentsConfig.agents = {
+      ...agentsConfig.agents,
+      ...remoteAgentsConfig.agents
+    };
+    console.log(`[INFO] Loaded ${Object.keys(remoteAgentsConfig.agents).length} remote agent(s) from agents.json`);
+  }
+} catch (err) {
+  console.log('[INFO] No agents.json found or error loading it, using local agent only');
+}
+
+// Load agents from environment variables (AGENT_NAME_URL and AGENT_NAME_TOKEN pattern)
+// This allows defining agents in docker-compose without agents.json
+const envAgentPattern = /^AGENT_(.+)_URL$/;
+for (const [key, value] of Object.entries(process.env)) {
+  const match = key.match(envAgentPattern);
+  if (match && value) {
+    const agentName = match[1].toLowerCase().replace(/_/g, '-');
+    const tokenKey = `AGENT_${match[1]}_TOKEN`;
+    const nameKey = `AGENT_${match[1]}_NAME`;
+    const token = process.env[tokenKey];
+    const displayName = process.env[nameKey] || agentName;
+    
+    if (token) {
+      agentsConfig.agents[agentName] = {
+        type: 'agent',
+        url: value,
+        token: token,
+        name: displayName
+      };
+      console.log(`[INFO] Loaded agent from env: ${agentName} (${displayName}) -> ${value}`);
+    }
+  }
+}
+
+console.log(`[INFO] Total agents configured: ${Object.keys(agentsConfig.agents).length}`);
+
+// Create Docker client factory based on agent configuration
+function getDockerClient(agentKey) {
+  const agent = agentsConfig.agents?.[agentKey];
+  if (!agent) {
+    throw new Error(`Unknown agent: ${agentKey}`);
+  }
+
+  if (agent.type === 'socket') {
+    return new Docker({
+      socketPath: agent.socketPath || '/var/run/docker.sock'
+    });
+  }
+
+  // For remote agents, return a proxy object that forwards to HTTP API
+  if (agent.type === 'agent') {
+    return {
+      _isRemoteAgent: true,
+      _url: agent.url,
+      _token: agent.token,
+      listContainers: async (opts) => {
+        const url = `${agent.url}/api/containers/json?all=${opts.all ? 1 : 0}`;
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${agent.token}` }
+        });
+        if (!response.ok) throw new Error(`Agent ${agentKey}: HTTP ${response.status}`);
+        return response.json();
+      },
+      getContainer: (id) => ({
+        stats: async (opts) => {
+          const url = `${agent.url}/api/containers/${id}/stats?stream=${opts.stream ? 1 : 0}`;
+          const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${agent.token}` },
+            signal: opts.signal
+          });
+          if (!response.ok) throw new Error(`Agent ${agentKey}: HTTP ${response.status}`);
+          return opts.stream ? response.body : response.json();
+        }
+      })
+    };
+  }
+
+  throw new Error(`Unknown agent type: ${agent.type}`);
+}
+
+const docker = getDockerClient('local');
 
 
 const app = express();
@@ -130,8 +230,30 @@ const api = express.Router();
 
 app.get('/healthz', (_, res) => res.type('text/plain').send('ok'));
 
+// Middleware to parse agent from query/header
+api.use((req, res, next) => {
+  const agentKey = req.query.agent || req.headers['x-agent'] || 'local';
+  if (!agentsConfig.agents?.[agentKey]) {
+    return res.status(400).json({ error: `Unknown agent: ${agentKey}` });
+  }
+  req._agentKey = agentKey;
+  next();
+});
+
 // API routes
 app.use('/docker', api);
+
+// Serve agents.json for frontend to read colors
+app.get('/agents.json', async (req, res) => {
+  try {
+    const agentsFile = path.join(__dirname, 'agents.json');
+    const agentsData = await readFile(agentsFile, 'utf8');
+    res.type('application/json').send(agentsData);
+  } catch (err) {
+    // Return empty agents if file doesn't exist
+    res.json({ agents: {} });
+  }
+});
 
 // Inject configuration into frontend
 app.use('/', async (req, res, next) => {
@@ -194,11 +316,22 @@ app.use(express.static(path.join(__dirname, 'public'), {
 api.use(limiter);
 api.use(requireApiKey);
 
-// GET /containers/json?all=1
+// GET /agents - List available agents
+api.get('/agents', (req, res) => {
+  const agents = Object.entries(agentsConfig.agents || {}).map(([key, config]) => ({
+    key,
+    name: config.name || key,
+    type: config.type
+  }));
+  res.json({ agents });
+});
+
+// GET /containers/json?all=1&agent=remote-agent-1
 api.get('/containers/json', async (req, res) => {
   try {
     const all = clampAll(String(req.query.all ?? '1'));
-    const list = await docker.listContainers({ all });
+    const client = getDockerClient(req._agentKey);
+    const list = await client.listContainers({ all });
     // Filter container list to only include necessary fields
     const filtered = list.map(container => ({
       Id: container.Id,
@@ -213,13 +346,14 @@ api.get('/containers/json', async (req, res) => {
     }));
     res.json(filtered);
   } catch (err) {
+    logger.error(`Error listing containers on agent ${req._agentKey}:`, err);
     res.status(500).json(safeErr(err));
   }
 });
 
 
 
-// GET /containers/:id/stats?stream=1 (NDJSON) or stream=0 (snapshot)
+// GET /containers/:id/stats?stream=1&agent=remote-agent-1 (NDJSON) or stream=0 (snapshot)
 api.get('/containers/:id/stats', async (req, res) => {
   const id = req.params.id;
   if (!isSafeId(id)) return res.status(400).json({ error: 'Invalid container id' });
@@ -230,8 +364,10 @@ api.get('/containers/:id/stats', async (req, res) => {
   const timer = setTimeout(() => abort.abort(), STREAM_MAX_MS);
 
   try {
+    const client = getDockerClient(req._agentKey);
+    
     if (!wantStream) {
-      const snap = await docker.getContainer(id).stats({ stream: false, signal: abort.signal });
+      const snap = await client.getContainer(id).stats({ stream: false, signal: abort.signal });
       clearTimeout(timer);
       // redact snapshot stats to only include numeric metrics
       const filtered = {
@@ -252,7 +388,36 @@ api.get('/containers/:id/stats', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Connection', 'keep-alive');
 
-    const s = await docker.getContainer(id).stats({ stream: true, signal: abort.signal });
+    const s = await client.getContainer(id).stats({ stream: true, signal: abort.signal });
+    
+    // Handle remote agent streams (ReadableStream from fetch)
+    if (client._isRemoteAgent) {
+      const reader = s.getReader();
+      const decoder = new TextDecoder();
+      
+      const closeAll = () => {
+        clearTimeout(timer);
+        try { reader.cancel(); } catch {}
+        try { res.end(); } catch {}
+      };
+      
+      req.on('close', () => { abort.abort(); closeAll(); });
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+      } catch (e) {
+        logger.error(`Error streaming stats from agent ${req._agentKey}:`, e);
+      } finally {
+        closeAll();
+      }
+      return;
+    }
+    
+    // Handle local Docker socket streams
     const closeAll = () => {
       clearTimeout(timer);
       try { s.destroy(); } catch {}
@@ -289,6 +454,7 @@ api.get('/containers/:id/stats', async (req, res) => {
     req.on('close', () => { abort.abort(); closeAll(); });
   } catch (err) {
     clearTimeout(timer);
+    logger.error(`Error getting stats from agent ${req._agentKey}:`, err);
     const code = String(err?.statusCode || '').startsWith('4') ? err.statusCode : 500;
     res.status(code || 500).json(safeErr(err));
   }

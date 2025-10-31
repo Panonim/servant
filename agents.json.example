@@ -1,0 +1,16 @@
+{
+  "agents": {
+    "Test Agent": {
+      "type": "agent",
+      "url": "http://localhost:3001",
+      "token": "your-agent-token-here",
+      "color": "#3b82f6"
+    },
+    "Another Agent": {
+      "type": "agent",
+      "url": "http://localhost:3002",
+      "token": "another-token",
+      "color": "#10b981"
+    }
+  }
+}
