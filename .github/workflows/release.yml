@@ -10,13 +10,33 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      main: ${{ steps.filter.outputs.main }}
+      agent: ${{ steps.filter.outputs.agent }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            main:
+              - '!(servant-agent/**)'
+            agent:
+              - 'servant-agent/**'
+
   build-main:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write
-    if: github.event_name == 'pull_request' || github.ref_type == 'tag' || !contains(github.event.head_commit.modified, 'servant-agent/')
+    needs: changes
+    if: ${{ github.ref_type == 'tag' || needs.changes.outputs.main == 'true' }}
 
     steps:
       - name: Checkout repository
@@ -64,7 +84,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    if: github.event_name == 'pull_request' || github.ref_type == 'tag' || contains(github.event.head_commit.modified, 'servant-agent/')
+    needs: changes
+    if: ${{ github.ref_type == 'tag' || needs.changes.outputs.agent == 'true' }}
 
     steps:
       - name: Checkout repository

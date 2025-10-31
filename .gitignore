@@ -1,6 +1,7 @@
 compose.yml
+docker-compose.yml
 package-lock.json
-
+agents.json
 # Environment files (keep .env.example, ignore active .env)
 .env
 .env.local
