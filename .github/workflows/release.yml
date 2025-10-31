@@ -1,46 +1,31 @@
-name: Release Packages
+name: Release Servant (main)
 on:
   push:
     branches: [ main, beta ]
     tags: [ 'v*.*.*' ]
+    paths-ignore:
+      - 'servant-agent/**'
   pull_request:
     branches: [ main, beta ]
+    paths-ignore:
+      - 'servant-agent/**'
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      main: ${{ steps.filter.outputs.main }}
-      agent: ${{ steps.filter.outputs.agent }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Detect changed paths
-        id: filter
-        uses: dorny/paths-filter@v2
-        with:
-          filters: |
-            main:
-              - '!(servant-agent/**)'
-            agent:
-              - 'servant-agent/**'
-
   build-main:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write
-    needs: changes
-    if: ${{ github.ref_type == 'tag' || needs.changes.outputs.main == 'true' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
@@ -59,67 +44,18 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/panonim/servant
           tags: |
-            type=ref,event=branch,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=ref,event=pr,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{version}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{major}}.{{minor}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{major}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=sha,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
 
       - name: Build and push Docker image
         id: build-and-push
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-  build-agents:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    needs: changes
-    if: ${{ github.ref_type == 'tag' || needs.changes.outputs.agent == 'true' }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Docker buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/panonim/servant-agent
-          tags: |
-            type=ref,event=branch,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=ref,event=pr,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{version}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{major}}.{{minor}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=semver,pattern={{major}}${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-            type=sha,suffix=${{ github.ref == 'refs/heads/beta' && '-beta' || '' }}
-
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@v5
-        with:
-          context: ./servant-agent
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
