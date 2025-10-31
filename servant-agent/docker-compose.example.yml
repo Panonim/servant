@@ -1,0 +1,21 @@
+services:
+  servant-agent:
+    image: ghcr.io/panonim/servant-agent:latest
+    container_name: servant-agent
+    ports:
+      - "6061:6061"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # REQUIRED: Set a secure token (minimum 32 characters)
+      # Generate with: openssl rand -hex 32
+      AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN is required - set in .env file}
+      ALLOWED_ORIGINS: "*" # Adjust for CORS as needed
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6061/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

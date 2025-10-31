@@ -23,12 +23,31 @@
   function applyTheme(theme) {
     const isLight = theme === 'light';
     root.setAttribute('data-theme', theme);
-    if (elTheme) {
-      const icon = elTheme.querySelector('img');
-      if (icon) {
-        icon.src = isLight ? './assets/sun.svg' : './assets/moon.svg';
+    // Update theme toggle icons (desktop + mobile)
+    try {
+      const iconSrc = isLight ? './assets/sun.svg' : './assets/moon.svg';
+      // Desktop toggle
+      if (elTheme) {
+        const icon = elTheme.querySelector('img');
+        if (icon && icon.src !== new URL(iconSrc, location.href).href) {
+          icon.src = iconSrc;
+        }
       }
-    }
+      // Mobile toggle (query directly to avoid temporal dead zone before const declaration)
+      const elThemeMobileBtn = document.getElementById('toggleThemeMobile');
+      if (elThemeMobileBtn) {
+        const mobIcon = elThemeMobileBtn.querySelector('img');
+        if (mobIcon && mobIcon.src !== new URL(iconSrc, location.href).href) {
+          mobIcon.src = iconSrc;
+        }
+      }
+
+      // Ensure GitHub icon color flips with theme (desktop + mobile)
+      const ghIcons = document.querySelectorAll('.github-link img');
+      ghIcons.forEach(img => {
+        img.style.filter = isLight ? 'invert(0%)' : 'invert(100%)';
+      });
+    } catch {}
     // Update favicon to match theme
     setFaviconByTheme(theme);
   }
@@ -120,11 +139,16 @@
 
   // Sync mobile menu with desktop controls
   function syncMobileMenu() {
+    const agentFilter = document.getElementById('agentFilter');
     const statusFilter = document.getElementById('statusFilter');
     const sortBy = document.getElementById('sortBy');
+    const agentFilterMobile = document.getElementById('agentFilterMobile');
     const statusFilterMobile = document.getElementById('statusFilterMobile');
     const sortByMobile = document.getElementById('sortByMobile');
     
+    if (agentFilter && agentFilterMobile) {
+      agentFilterMobile.value = agentFilter.value;
+    }
     if (statusFilter && statusFilterMobile) {
       statusFilterMobile.value = statusFilter.value;
     }
@@ -138,14 +162,16 @@
 
   // App state
   let containers = [];
+  let agents = [];
+  let agentsConfig = {};
   let statsStreams = new Map();
   let auto = true;
   let pollTimer = null;
   let manualStatsControl = new Set(); // Track containers with manual stats control
 
   const elList = document.getElementById('list');
-  const elCount = document.getElementById('count');
   const elSearch = document.getElementById('search');
+  const elAgentFilter = document.getElementById('agentFilter');
   const elStatus = document.getElementById('statusFilter');
   const elSort = document.getElementById('sortBy');
   const elRunning = document.getElementById('statRunning');
@@ -208,15 +234,20 @@
   }
   function imageParts(image) {
     if (!image) return {repo:'', tag:''};
+    let repo = image, tag = 'latest';
     if (image.includes('@')) {
-      const [repo] = image.split('@');
-      return {repo, tag:'digest'};
+      [repo] = image.split('@');
     }
-    const ix = image.lastIndexOf(':');
-    if (ix > 0 && !image.includes('://')) {
-      return {repo: image.slice(0, ix), tag: image.slice(ix+1)};
+    const ix = repo.lastIndexOf(':');
+    if (ix > 0 && !repo.slice(ix).includes('/')) {
+      tag = repo.slice(ix+1);
+      repo = repo.slice(0, ix);
+    } else if (!image.includes('@')) {
+      tag = 'latest';
+    } else {
+      tag = 'digest';
     }
-    return {repo: image, tag: 'latest'};
+    return {repo, tag};
   }
   function portString(p) {
     if (!p || !p.length) return '-';
@@ -278,6 +309,85 @@
     }
   }
 
+  // Load available agents
+  async function loadAgents() {
+    try {
+      const data = await fetchJSON(`${API_BASE}/agents`);
+      agents = (data.agents || []).filter(a => a.key !== 'local'); // Exclude local from agents list
+      
+      // Load agent colors from agents.json
+      try {
+        const response = await fetch('/agents.json');
+        if (response.ok) {
+          const agentsData = await response.json();
+          if (agentsData.agents) {
+            // Store colors from agents.json
+            agentsConfig = agentsData.agents;
+          }
+        }
+      } catch (e) {
+        console.debug('Could not load agents.json:', e);
+      }
+      
+      // Update agent filter dropdowns
+      updateAgentFilter();
+    } catch (error) {
+      console.error('Failed to load agents:', error);
+      agents = [];
+    }
+  }
+
+  function updateAgentFilter() {
+    const desktopFilter = elAgentFilter;
+    const mobileFilter = document.getElementById('agentFilterMobile');
+    
+    // Store current selection
+    const currentValue = desktopFilter.value;
+    
+    // Clear and rebuild options
+    [desktopFilter, mobileFilter].forEach(filter => {
+      if (!filter) return;
+      filter.innerHTML = '<option value="">All agents</option>';
+      
+      // Add Local option first
+      const localOption = document.createElement('option');
+      localOption.value = 'local';
+      localOption.textContent = 'Local';
+      filter.appendChild(localOption);
+      
+      // Add remote agents
+      agents.forEach(agent => {
+        if (agent.key !== 'local') {
+          const option = document.createElement('option');
+          option.value = agent.key;
+          option.textContent = agent.name || agent.key;
+          filter.appendChild(option);
+        }
+      });
+    });
+    
+    // Restore selection
+    if (currentValue) {
+      desktopFilter.value = currentValue;
+      if (mobileFilter) mobileFilter.value = currentValue;
+    }
+  }
+
+  function getAgentColor(agentKey) {
+    if (agentKey === 'local') {
+      return '#888888'; // Gray for local
+    }
+    return agentsConfig[agentKey]?.color || '#3b82f6';
+  }
+
+  function getAgentName(agentKey) {
+    if (agentKey === 'local') {
+      return 'Local';
+    }
+    const agent = agents.find(a => a.key === agentKey);
+    return agent?.name || agentKey;
+  }
+
 
 
   async function loadContainers() {
@@ -288,35 +398,66 @@
       // Store active stats streams before updating
       const activeStatsIds = Array.from(statsStreams.keys());
       
-      const list = await fetchJSON(`${API_BASE}/containers/json?all=1`);
+      // Load containers from local and all remote agents
+      const containerPromises = [];
       
-      // If the fetch was successful, update the containers list
-      if (list) {
-        containers = list.map(c => ({
-          id: c.Id,
-          names: c.Names || [],
-          name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
-          image: c.Image || '',
-          state: c.State || '',
-          status: c.Status || '',
-          ports: c.Ports || [],
-          created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
-          cpu: null,
-          mem: null,
-          memLimit: null
-        }));
-      }
+      // Always load local containers
+      containerPromises.push((async () => {
+        try {
+          const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=local`);
+          return list.map(c => ({
+            id: c.Id,
+            names: c.Names || [],
+            name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
+            image: c.Image || '',
+            state: c.State || '',
+            status: c.Status || '',
+            ports: c.Ports || [],
+            created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
+            cpu: null,
+            mem: null,
+            memLimit: null,
+            agent: 'local'
+          }));
+        } catch (error) {
+          console.error('Failed to load local containers:', error);
+          return [];
+        }
+      })());
+      
+      // Load containers from remote agents
+      agents.forEach(agent => {
+        if (agent.key !== 'local') {
+          containerPromises.push((async () => {
+            try {
+              const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=${agent.key}`);
+              return list.map(c => ({
+                id: c.Id,
+                names: c.Names || [],
+                name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
+                image: c.Image || '',
+                state: c.State || '',
+                status: c.Status || '',
+                ports: c.Ports || [],
+                created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
+                cpu: null,
+                mem: null,
+                memLimit: null,
+                agent: agent.key
+              }));
+            } catch (error) {
+              console.error(`Failed to load containers from agent ${agent.key}:`, error);
+              return [];
+            }
+          })());
+        }
+      });
+      
+      const results = await Promise.all(containerPromises);
+      containers = results.flat();
       
       updateSummary();
       render();
-      
-      // Preserve the active stats streams and their indicators after re-rendering
-      // This ensures the red dots stay visible after container data refresh
-      activeStatsIds.forEach(id => {
-        if (containers.find(c => c.id === id) && statsStreams.has(id)) {
-          updateStatsIndicator(id, true);
-        }
-      });
       
       // If auto mode is enabled, start stats for running containers
       // BUT respect manual control - don't override user's explicit choices
@@ -326,8 +467,7 @@
           // 1. Stream is not already active
           // 2. User hasn't manually disabled it
           if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
-            openStatsStream(c.id);
-            updateStatsIndicator(c.id, true);
+            openStatsStream(c.id, c.agent);
           }
         });
       }
@@ -348,16 +488,17 @@
     elStopped.textContent = stopped;
     elImages.textContent = images;
     elUpdated.textContent = timeNow();
-    elCount.textContent = `${containers.length} containers`;
   }
 
   function filtered() {
     const q = elSearch.value.trim().toLowerCase();
     const st = elStatus.value;
+    const ag = elAgentFilter.value;
     let arr = containers.filter(c => {
       const matchesQ = !q || c.name.toLowerCase().includes(q) || c.image.toLowerCase().includes(q);
       const matchesS = !st || c.state === st;
-      return matchesQ && matchesS;
+      const matchesA = !ag || c.agent === ag;
+      return matchesQ && matchesS && matchesA;
     });
     const s = elSort.value;
     if (s === 'name') arr.sort((a,b)=>a.name.localeCompare(b.name));
@@ -466,23 +607,25 @@
     second: '2-digit'
   }) : '-';
     const imgHref = guessImageURL(repo, tag);
+    const agentColor = getAgentColor(c.agent);
+    const agentName = getAgentName(c.agent);
+    const isLocalAgent = c.agent === 'local';
+    const borderStyle = !isLocalAgent ? `border-color: ${agentColor};` : '';
 
     return `
-      <div class="card" data-id="${c.id}">
+      <div class="card" data-id="${c.id}" style="${borderStyle}">
         <div class="head">
           <div>
             <div class="name">
               <span class="dot ${dotClass}"></span>
               <span>${escapeHTML(c.name)}</span>
+              ${!isLocalAgent ? `<span class="agent-name">${escapeHTML(agentName)}</span>` : ''}
             </div>
             <div class="id">${c.id.slice(0,12)}</div>
           </div>
           <div class="chips">
             ${c.state && c.state !== 'exited' ? `<span class="chip ${dotClass}" data-chip-type="state">${escapeHTML(c.state)}</span>` : ''}
             ${c.status ? `<span class="chip" data-chip-type="status">${escapeHTML(c.status)}</span>` : ''}
-            <button class="chip icon-chip" data-action="stats" data-id="${c.id}" title="Toggle live stats">
-              <div class="stats-indicator"></div>
-            </button>
           </div>
         </div>
 
@@ -527,23 +670,16 @@
     return `https://hub.docker.com/_/${encodeURIComponent(name)}?tab=tags&name=${encodeURIComponent(tag)}`;
   }
 
-  function updateStatsIndicator(id, isActive) {
-    const indicator = document.querySelector(`[data-id="${id}"] .stats-indicator`);
-    if (indicator) {
-      indicator.classList.toggle('active', isActive);
-    }
-  }
-
   function restartStatsStreams() {
     for (const [id, ctl] of statsStreams) { try { ctl.abort(); } catch {} }
     statsStreams.clear();
     // No auto-start to keep the UI fast; start streams via the per-card toggle
   }
 
-  function openStatsStream(id) {
+  function openStatsStream(id, agent) {
     const ctrl = new AbortController();
     statsStreams.set(id, ctrl);
-    const url = `${API_BASE}/containers/${id}/stats?stream=1`; // per-container live stats. [web:10][web:39]
+    const url = `${API_BASE}/containers/${id}/stats?stream=1&agent=${agent}`; // per-container live stats. [web:10][web:39]
     fetch(url, { signal: ctrl.signal }).then(async r => {
       if (!r.ok || !r.body) throw new Error(`stats ${r.status}`);
       const reader = r.body.getReader();
@@ -570,14 +706,13 @@
       }
     }).catch(() => {
       statsStreams.delete(id);
-      updateStatsIndicator(id, false);
     });
   }
 
   // Fetch a single, non-streaming stats snapshot for a container
-  async function fetchStatsOnce(id) {
+  async function fetchStatsOnce(id, agent) {
     try {
-      const s = await fetchJSON(`${API_BASE}/containers/${id}/stats?stream=0`);
+      const s = await fetchJSON(`${API_BASE}/containers/${id}/stats?stream=0&agent=${agent}`);
       updateUsageFromStats(id, s);
     } catch (e) {
       // Swallow per-container errors to keep UX smooth on manual refresh
@@ -588,17 +723,17 @@
   // When Auto is OFF and user presses Refresh, fetch a one-time stats snapshot
   async function fetchOneShotStatsForVisible() {
     // Only consider currently running containers in the filtered view
-    const ids = filtered().filter(c => c.state === 'running').map(c => c.id);
+    const items = filtered().filter(c => c.state === 'running');
     // Limit concurrency a bit to avoid hammering the engine
     const concurrency = 4;
     let i = 0;
     const next = async () => {
-      if (i >= ids.length) return;
-      const id = ids[i++];
-      await fetchStatsOnce(id);
+      if (i >= items.length) return;
+      const item = items[i++];
+      await fetchStatsOnce(item.id, item.agent);
       return next();
     };
-    const workers = Array.from({ length: Math.min(concurrency, ids.length) }, next);
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, next);
     await Promise.allSettled(workers);
   }
 
@@ -630,6 +765,7 @@
   }
 
   // Mobile menu elements
+  const elAgentMobile = document.getElementById('agentFilterMobile');
   const elStatusMobile = document.getElementById('statusFilterMobile');
   const elSortMobile = document.getElementById('sortByMobile');
   const elRefreshMobile = document.getElementById('refreshMobile');
@@ -639,6 +775,16 @@
 
   // Sync mobile menu events
   function syncMobileEvents() {
+    if (elAgentFilter && elAgentMobile) {
+      elAgentFilter.addEventListener('change', () => {
+        elAgentMobile.value = elAgentFilter.value;
+        render();
+      });
+      elAgentMobile.addEventListener('change', () => {
+        elAgentFilter.value = elAgentMobile.value;
+        render();
+      });
+    }
     if (elStatus && elStatusMobile) {
       elStatus.addEventListener('change', () => {
         elStatusMobile.value = elStatus.value;
@@ -685,9 +831,36 @@
   }
   syncMobileEvents();
 
+
+  // --- Random Tips Feature ---
+  const tips = [
+    "You can click the image name to open its page.",
+    "Toggle 'Auto' to switch between live and manual stats refresh.",
+    "Search supports both container names and image names.",
+    "Sort containers by name, state, or creation time using the dropdown.",
+    "Theme and auto-refresh settings are saved for your next visit.",
+    "Mobile menu syncs with desktop controls for seamless switching.",
+    "Hover over chips for extra info and tooltips.",
+    "Click the GitHub icon to view or contribute to ServAnt's source code.",
+    "The app auto-pauses when the browser tab is hidden.",
+    "Container cards show port mappings and creation time details."
+  ];
+
+  function showRandomTip() {
+    const tipFooter = document.querySelector('.footer > div');
+    if (tipFooter) {
+      const idx = Math.floor(Math.random() * tips.length);
+      tipFooter.textContent = `Tip: ${tips[idx]}`;
+    }
+  }
+
   // Events
   elSearch.addEventListener('input', () => {
     localStorage.setItem('searchQuery', elSearch.value);
+    render();
+  });
+  elAgentFilter.addEventListener('change', () => {
+    localStorage.setItem('agentFilter', elAgentFilter.value);
     render();
   });
   elStatus.addEventListener('change', () => {
@@ -717,7 +890,7 @@
       // But respect manual control preferences
       containers.filter(c => c.state === 'running').forEach(c => {
         if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
-          openStatsStream(c.id);
+          openStatsStream(c.id, c.agent);
           updateStatsIndicator(c.id, true);
         }
       });
@@ -728,49 +901,13 @@
       // Stop all stats streams when Auto is turned off
       for (const [id, ctl] of statsStreams) {
         try { ctl.abort(); } catch {}
-        updateStatsIndicator(id, false);
       }
       statsStreams.clear();
     }
   });
 
 
-  document.getElementById('list').addEventListener('click', async (e) => {
-    const btn = e.target.closest('button[data-action]');
-    if (!btn) return;
-    const id = btn.getAttribute('data-id');
-    const action = btn.getAttribute('data-action');
-
-    if (action === 'stats') {
-      const ctl = statsStreams.get(id);
-      if (ctl) { 
-        // Stop the stats stream for this specific container
-        try { ctl.abort(); } catch {} 
-        statsStreams.delete(id);
-        updateStatsIndicator(id, false);
-        // Mark this container as manually controlled (disabled)
-        manualStatsControl.add(id);
-        // Clear the stats data for this container
-        const idx = containers.findIndex(c => c.id === id);
-        if (idx >= 0) {
-          containers[idx].cpu = null;
-          containers[idx].mem = null;
-          containers[idx].memLimit = null;
-        }
-        // Update the display immediately
-        const elCPU = document.querySelector(`[data-cpu="${id}"]`);
-        const elMem = document.querySelector(`[data-mem="${id}"]`);
-  if (elCPU) elCPU.textContent = '';
-  if (elMem) elMem.textContent = '';
-      } else {
-        // Start the stats stream for this specific container
-        openStatsStream(id);
-        updateStatsIndicator(id, true);
-        // Remove from manual control (user wants it enabled)
-        manualStatsControl.delete(id);
-      }
-    }
-  });
+  // Removed stats toggle button click handler
 
   function startPolling() {
     stopPolling(); 
@@ -789,7 +926,6 @@
       stopPolling();
       for (const [id, ctl] of statsStreams) {
         try { ctl.abort(); } catch {}
-        updateStatsIndicator(id, false);
       }
       statsStreams.clear();
       if (CONFIG.logLevel === 'debug') {
@@ -803,8 +939,7 @@
         // Restart stats streams for running containers, respecting manual control
         containers.filter(c => c.state === 'running').forEach(c => {
           if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
-            openStatsStream(c.id);
-            updateStatsIndicator(c.id, true);
+            openStatsStream(c.id, c.agent);
           }
         });
       }
@@ -814,6 +949,7 @@
 
   (async function init() {
     elSearch.value = localStorage.getItem('searchQuery') || '';
+    elAgentFilter.value = localStorage.getItem('agentFilter') || '';
     elStatus.value = localStorage.getItem('statusFilter') || '';
     elSort.value = localStorage.getItem('sortBy') || 'name';
     auto = localStorage.getItem('autoRefresh') !== 'false';
@@ -825,8 +961,12 @@
     if (window.innerWidth > 1024) {
       elSearch.focus();
     }
-    
+
+    showRandomTip();
+
     try {
+      // Load agents first
+      await loadAgents();
       await loadContainers();
       startPolling();
       // Enable stats for all running containers on initial load since auto starts as ON
@@ -834,8 +974,7 @@
       if (auto) {
         containers.filter(c => c.state === 'running').forEach(c => {
           if (!statsStreams.has(c.id)) {
-            openStatsStream(c.id);
-            updateStatsIndicator(c.id, true);
+            openStatsStream(c.id, c.agent);
           }
         });
       }
