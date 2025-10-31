@@ -1,20 +1,20 @@
-name: Release Servant (main)
+name: Release Servant Agent
 on:
   push:
     branches: [ main, beta ]
     tags: [ 'v*.*.*' ]
-    paths-ignore:
+    paths:
       - 'servant-agent/**'
   pull_request:
     branches: [ main, beta ]
-    paths-ignore:
+    paths:
       - 'servant-agent/**'
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-main:
+  build-agent:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,7 +42,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/panonim/servant
+          images: ${{ env.REGISTRY }}/panonim/servant-agent
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -55,7 +55,7 @@ jobs:
         id: build-and-push
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./servant-agent
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
