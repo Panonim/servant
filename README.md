@@ -6,6 +6,12 @@
 
 **ServAnt** is a lightweight, web-based Docker container dashboard that provides real-time monitoring and management of your containers. Built with Express and Dockerode, it offers a clean interface to view container status, resource usage, and basic metrics—all through a simple, responsive UI.
 
+> [!WARNING]
+>
+> Agent is still in testing phase, please use at your own risk.
+> 
+> Report any found bugs here: https://github.com/Panonim/servant/issues
+
 ## Two Versions Available
 
 - **ServAnt (Main)** - Interactive web dashboard with UI. Note: Main version of servant already contains agent. 
