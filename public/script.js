@@ -328,6 +328,9 @@
       const data = await fetchJSON(`${API_BASE}/agents`);
       agents = (data.agents || []).filter(a => a.key !== 'local'); // Exclude local from agents list
       
+      // Clear agent name cache when reloading agents
+      clearAgentCache();
+      
       // Load agent colors from agents.json
       try {
         const response = await fetch('/agents.json');
@@ -393,12 +396,29 @@
     return agentsConfig[agentKey]?.color || '#3b82f6';
   }
 
+  // Cache agent names to avoid repeated lookups
+  const agentNameCache = new Map();
+  
   function getAgentName(agentKey) {
     if (agentKey === 'local') {
       return 'Local';
     }
+    
+    // Check cache first
+    if (agentNameCache.has(agentKey)) {
+      return agentNameCache.get(agentKey);
+    }
+    
+    // Lookup and cache
     const agent = agents.find(a => a.key === agentKey);
-    return agent?.name || agentKey;
+    const name = agent?.name || agentKey;
+    agentNameCache.set(agentKey, name);
+    return name;
+  }
+  
+  // Clear cache when agents are reloaded
+  function clearAgentCache() {
+    agentNameCache.clear();
   }
 
 
@@ -408,63 +428,51 @@
     clearErrorState();
     
     try {
-      // Store active stats streams before updating
-      const activeStatsIds = Array.from(statsStreams.keys());
+      // Store active stats streams before updating (not used, can be removed)
       
       // Load containers from local and all remote agents
       const containerPromises = [];
+      
+      // Helper function to transform container data - DRY principle
+      const transformContainer = (c, agentKey) => ({
+        id: c.Id,
+        names: c.Names || [],
+        name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
+        image: c.Image || '',
+        state: c.State || '',
+        status: c.Status || '',
+        ports: c.Ports || [],
+        created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
+        cpu: null,
+        mem: null,
+        memLimit: null,
+        agent: agentKey
+      });
       
       // Always load local containers
       containerPromises.push((async () => {
         try {
           const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=local`);
-          return list.map(c => ({
-            id: c.Id,
-            names: c.Names || [],
-            name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
-            image: c.Image || '',
-            state: c.State || '',
-            status: c.Status || '',
-            ports: c.Ports || [],
-            created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
-            cpu: null,
-            mem: null,
-            memLimit: null,
-            agent: 'local'
-          }));
+          return list.map(c => transformContainer(c, 'local'));
         } catch (error) {
           console.error('Failed to load local containers:', error);
           return [];
         }
       })());
       
-      // Load containers from remote agents
-      agents.forEach(agent => {
-        if (agent.key !== 'local') {
-          containerPromises.push((async () => {
-            try {
-              const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=${agent.key}`);
-              return list.map(c => ({
-                id: c.Id,
-                names: c.Names || [],
-                name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
-                image: c.Image || '',
-                state: c.State || '',
-                status: c.Status || '',
-                ports: c.Ports || [],
-                created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
-                cpu: null,
-                mem: null,
-                memLimit: null,
-                agent: agent.key
-              }));
-            } catch (error) {
-              console.error(`Failed to load containers from agent ${agent.key}:`, error);
-              return [];
-            }
-          })());
-        }
-      });
+      // Load containers from remote agents (filter in advance)
+      const remoteAgents = agents.filter(agent => agent.key !== 'local');
+      for (const agent of remoteAgents) {
+        containerPromises.push((async () => {
+          try {
+            const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=${agent.key}`);
+            return list.map(c => transformContainer(c, agent.key));
+          } catch (error) {
+            console.error(`Failed to load containers from agent ${agent.key}:`, error);
+            return [];
+          }
+        })());
+      }
       
       const results = await Promise.all(containerPromises);
       containers = results.flat();
@@ -475,14 +483,18 @@
       // If auto mode is enabled, start stats for running containers
       // BUT respect manual control - don't override user's explicit choices
       if (auto) {
-        containers.filter(c => c.state === 'running').forEach(c => {
-          // Only start stats if:
-          // 1. Stream is not already active
-          // 2. User hasn't manually disabled it
-          if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
-            openStatsStream(c.id, c.agent);
+        // Use for loop for better performance with large arrays
+        for (let i = 0; i < containers.length; i++) {
+          const c = containers[i];
+          if (c.state === 'running') {
+            // Only start stats if:
+            // 1. Stream is not already active
+            // 2. User hasn't manually disabled it
+            if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
+              openStatsStream(c.id, c.agent);
+            }
           }
-        });
+        }
       }
       
       // Clear error state on successful load
@@ -494,12 +506,20 @@
   }
 
   function updateSummary() {
-    const running = containers.filter(c => c.state==='running').length;
-    const images = new Set(containers.map(c => c.image)).size;
+    let running = 0;
+    const imageSet = new Set();
+    
+    // Single pass through containers for better performance
+    for (let i = 0; i < containers.length; i++) {
+      const c = containers[i];
+      if (c.state === 'running') running++;
+      if (c.image) imageSet.add(c.image);
+    }
+    
     const stopped = containers.length - running;
     elRunning.textContent = running;
     elStopped.textContent = stopped;
-    elImages.textContent = images;
+    elImages.textContent = imageSet.size;
     elUpdated.textContent = timeNow();
   }
 
