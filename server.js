@@ -45,25 +45,28 @@ try {
 
 // Load agents from environment variables (AGENT_NAME_URL and AGENT_NAME_TOKEN pattern)
 // This allows defining agents in docker-compose without agents.json
+// Optimize by pre-filtering environment variables instead of checking all of them
 const envAgentPattern = /^AGENT_(.+)_URL$/;
-for (const [key, value] of Object.entries(process.env)) {
+const agentEnvKeys = Object.keys(process.env).filter(key => envAgentPattern.test(key));
+for (const key of agentEnvKeys) {
+  const value = process.env[key];
+  if (!value) continue;
+  
   const match = key.match(envAgentPattern);
-  if (match && value) {
-    const agentName = match[1].toLowerCase().replace(/_/g, '-');
-    const tokenKey = `AGENT_${match[1]}_TOKEN`;
-    const nameKey = `AGENT_${match[1]}_NAME`;
-    const token = process.env[tokenKey];
-    const displayName = process.env[nameKey] || agentName;
-    
-    if (token) {
-      agentsConfig.agents[agentName] = {
-        type: 'agent',
-        url: value,
-        token: token,
-        name: displayName
-      };
-      console.log(`[INFO] Loaded agent from env: ${agentName} (${displayName}) -> ${value}`);
-    }
+  const agentName = match[1].toLowerCase().replace(/_/g, '-');
+  const tokenKey = `AGENT_${match[1]}_TOKEN`;
+  const nameKey = `AGENT_${match[1]}_NAME`;
+  const token = process.env[tokenKey];
+  const displayName = process.env[nameKey] || agentName;
+  
+  if (token) {
+    agentsConfig.agents[agentName] = {
+      type: 'agent',
+      url: value,
+      token: token,
+      name: displayName
+    };
+    console.log(`[INFO] Loaded agent from env: ${agentName} (${displayName}) -> ${value}`);
   }
 }
 
@@ -255,6 +258,16 @@ app.get('/agents.json', async (req, res) => {
   }
 });
 
+// Cache script.js content in memory for performance
+let cachedScriptContent = null;
+async function getCachedScriptContent() {
+  if (!cachedScriptContent) {
+    const scriptPath = path.join(__dirname, 'public', 'script.js');
+    cachedScriptContent = await readFile(scriptPath, 'utf8');
+  }
+  return cachedScriptContent;
+}
+
 // Inject configuration into frontend
 app.use('/', async (req, res, next) => {
   if (req.path === '/script.js') {
@@ -263,8 +276,7 @@ app.use('/', async (req, res, next) => {
     const timeZone = process.env.TZ || 'UTC';
     
     try {
-      const scriptPath = path.join(__dirname, 'public', 'script.js');
-      const scriptContent = await import('fs/promises').then(fs => fs.readFile(scriptPath, 'utf8'));
+      const scriptContent = await getCachedScriptContent();
       
       const configScript = `window.__CONFIG__ = {
         logLevel: ${JSON.stringify(LOG_LEVEL)},
@@ -423,11 +435,17 @@ api.get('/containers/:id/stats', async (req, res) => {
       try { s.destroy(); } catch {}
       try { res.end(); } catch {}
     };
+    
+    // Use array buffer for better performance with large streams
+    let buffer = [];
+    
     s.on('data', (chunk) => {
       try {
         // docker stats tends to emit full JSON objects per chunk, but defensively split on newlines
         const txt = chunk.toString('utf8').trim();
         if (!txt) return;
+        
+        // Split and process parts
         const parts = txt.split(/\r?\n/).filter(Boolean);
         for (const p of parts) {
           try {
@@ -442,14 +460,31 @@ api.get('/containers/:id/stats', async (req, res) => {
               name: frame.name,
               id: frame.id
             };
-            res.write(JSON.stringify(filtered) + '\n');
+            
+            const jsonStr = JSON.stringify(filtered) + '\n';
+            
+            // Use buffering to reduce write calls
+            buffer.push(jsonStr);
+            if (buffer.length >= 5) {
+              const combined = buffer.join('');
+              buffer = [];
+              res.write(combined);
+            }
           } catch (e) {
             // ignore non-JSON or partial frames
           }
         }
       } catch (e) {}
     });
-    s.on('end', closeAll);
+    
+    // Flush remaining buffer on end
+    s.on('end', () => {
+      if (buffer.length > 0) {
+        res.write(buffer.join(''));
+        buffer = [];
+      }
+      closeAll();
+    });
     s.on('error', closeAll);
     req.on('close', () => { abort.abort(); closeAll(); });
   } catch (err) {

@@ -222,6 +222,9 @@ api.get('/containers/:id/stats', async (req, res) => {
       try { res.end(); } catch {}
     };
 
+    // Use array buffer for better performance with large streams
+    let buffer = [];
+    
     const onData = (chunk) => {
       try {
         const txt = chunk.toString('utf8').trim();
@@ -240,9 +243,18 @@ api.get('/containers/:id/stats', async (req, res) => {
               name: frame.name,
               id: frame.id
             };
-            // Pause stream if buffer is full, resume on drain
-            if (!res.write(JSON.stringify(filtered) + '\n')) {
-              s.pause();
+            
+            const jsonStr = JSON.stringify(filtered) + '\n';
+            
+            // Use buffering to reduce write calls
+            buffer.push(jsonStr);
+            if (buffer.length >= 5) {
+              const combined = buffer.join('');
+              buffer = [];
+              // Pause stream if buffer is full, resume on drain
+              if (!res.write(combined)) {
+                s.pause();
+              }
             }
           } catch (e) {
             // ignore non-JSON or partial frames
@@ -253,8 +265,23 @@ api.get('/containers/:id/stats', async (req, res) => {
 
     s.on('data', onData);
     res.on('drain', () => s.resume());
-    res.on('close', () => { abort.abort(); closeAll(); });
-    s.on('end', closeAll);
+    res.on('close', () => { 
+      // Flush remaining buffer on close
+      if (buffer.length > 0) {
+        try { res.write(buffer.join('')); } catch {}
+        buffer = [];
+      }
+      abort.abort(); 
+      closeAll(); 
+    });
+    s.on('end', () => {
+      // Flush remaining buffer on end
+      if (buffer.length > 0) {
+        try { res.write(buffer.join('')); } catch {}
+        buffer = [];
+      }
+      closeAll();
+    });
     s.on('error', closeAll);
     req.on('close', () => { abort.abort(); closeAll(); });
   } catch (err) {

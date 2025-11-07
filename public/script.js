@@ -160,6 +160,19 @@
   // API base for Docker Engine (behind a reverse proxy).
   const API_BASE = (window.__API_BASE__ || '/docker'); // Engine API version; proxy to negotiate newer if needed. [web:10][web:19]
 
+  // Debounce utility for performance optimization
+  function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+      const later = () => {
+        clearTimeout(timeout);
+        func(...args);
+      };
+      clearTimeout(timeout);
+      timeout = setTimeout(later, wait);
+    };
+  }
+
   // App state
   let containers = [];
   let agents = [];
@@ -521,8 +534,16 @@
     });
   
     // 2. Add new elements and update existing ones
+    // Cache querySelector results to avoid repeated DOM queries
+    const existingElements = new Map();
+    currentElements.forEach(el => {
+      if (newIds.has(el.dataset.id)) {
+        existingElements.set(el.dataset.id, el);
+      }
+    });
+    
     newOrder.forEach((c, index) => {
-      const existingEl = elList.querySelector(`[data-id="${c.id}"]`);
+      const existingEl = existingElements.get(c.id);
       if (existingEl) {
         // Update existing card's content if needed
         updateCard(existingEl, c);
@@ -534,13 +555,14 @@
         // Insert it into the correct position
         const nextEl = elList.children[index];
         elList.insertBefore(newEl, nextEl || null);
+        existingElements.set(c.id, newEl);
       }
     });
   
     // 3. Re-order existing elements to match the new sort order
     newOrder.forEach((c, index) => {
-      const el = elList.querySelector(`[data-id="${c.id}"]`);
-      if (elList.children[index] !== el) {
+      const el = existingElements.get(c.id);
+      if (el && elList.children[index] !== el) {
         elList.insertBefore(el, elList.children[index]);
       }
     });
@@ -684,16 +706,24 @@
       if (!r.ok || !r.body) throw new Error(`stats ${r.status}`);
       const reader = r.body.getReader();
       const decoder = new TextDecoder('utf-8');
-      let buf = ''; let lastUpdate = 0;
+      let buffer = ''; 
+      let lastUpdate = 0;
+      
       while (true) {
         const {done, value} = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, {stream:true});
-        let idx;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx+1);
+        
+        // Optimize buffer handling
+        buffer += decoder.decode(value, {stream:true});
+        
+        // Process complete lines
+        let lineEndIndex;
+        while ((lineEndIndex = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, lineEndIndex).trim();
+          buffer = buffer.slice(lineEndIndex + 1);
+          
           if (!line) continue;
+          
           try {
             const obj = JSON.parse(line);
             const ts = performance.now();
@@ -701,7 +731,14 @@
               lastUpdate = ts;
               updateUsageFromStats(id, obj);
             }
-          } catch {}
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+        
+        // Prevent buffer from growing too large (discard old incomplete data)
+        if (buffer.length > 10000) {
+          buffer = '';
         }
       }
     }).catch(() => {
@@ -751,11 +788,25 @@
     const memUsage = s.memory_stats?.usage ?? null;
     const memLimit = s.memory_stats?.limit ?? null;
 
+    // Batch DOM queries for better performance
     const elCPU = document.querySelector(`[data-cpu="${id}"]`);
     const elMem = document.querySelector(`[data-mem="${id}"]`);
-    if (elCPU && cpuPct != null) elCPU.textContent = `${cpuPct.toFixed(1)}%`;
-    if (elMem) elMem.textContent = `${fmtBytes(memUsage)}${memLimit?` / ${fmtBytes(memLimit)}`:''}`;
+    
+    // Update DOM only if elements exist and values have changed
+    if (elCPU && cpuPct != null) {
+      const newText = `${cpuPct.toFixed(1)}%`;
+      if (elCPU.textContent !== newText) {
+        elCPU.textContent = newText;
+      }
+    }
+    if (elMem) {
+      const newText = `${fmtBytes(memUsage)}${memLimit ? ` / ${fmtBytes(memLimit)}` : ''}`;
+      if (elMem.textContent !== newText) {
+        elMem.textContent = newText;
+      }
+    }
 
+    // Update container data
     const idx = containers.findIndex(c => c.id === id);
     if (idx >= 0) {
       containers[idx].cpu = cpuPct;
@@ -855,10 +906,13 @@
   }
 
   // Events
-  elSearch.addEventListener('input', () => {
+  // Debounce search input for better performance
+  const debouncedRender = debounce(() => {
     localStorage.setItem('searchQuery', elSearch.value);
     render();
-  });
+  }, 300);
+  
+  elSearch.addEventListener('input', debouncedRender);
   elAgentFilter.addEventListener('change', () => {
     localStorage.setItem('agentFilter', elAgentFilter.value);
     render();
