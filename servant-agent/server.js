@@ -222,6 +222,14 @@ api.get('/containers/:id/stats', async (req, res) => {
       try { res.end(); } catch {}
     };
 
+    // Helper to flush remaining buffer
+    const flushBuffer = () => {
+      if (buffer.length > 0) {
+        try { res.write(buffer.join('')); } catch {}
+        buffer = [];
+      }
+    };
+    
     // Use array buffer for better performance with large streams
     let buffer = [];
     
@@ -266,20 +274,12 @@ api.get('/containers/:id/stats', async (req, res) => {
     s.on('data', onData);
     res.on('drain', () => s.resume());
     res.on('close', () => { 
-      // Flush remaining buffer on close
-      if (buffer.length > 0) {
-        try { res.write(buffer.join('')); } catch {}
-        buffer = [];
-      }
+      flushBuffer();
       abort.abort(); 
       closeAll(); 
     });
     s.on('end', () => {
-      // Flush remaining buffer on end
-      if (buffer.length > 0) {
-        try { res.write(buffer.join('')); } catch {}
-        buffer = [];
-      }
+      flushBuffer();
       closeAll();
     });
     s.on('error', closeAll);

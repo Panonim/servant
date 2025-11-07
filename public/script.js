@@ -172,6 +172,10 @@
       timeout = setTimeout(later, wait);
     };
   }
+  
+  // Performance constants
+  const MAX_BUFFER_SIZE = 10000; // Maximum buffer size for stats stream parsing (bytes)
+  const STATS_UPDATE_INTERVAL = 1000; // Minimum time between stats updates (ms)
 
   // App state
   let containers = [];
@@ -428,8 +432,6 @@
     clearErrorState();
     
     try {
-      // Store active stats streams before updating (not used, can be removed)
-      
       // Load containers from local and all remote agents
       const containerPromises = [];
       
@@ -747,7 +749,7 @@
           try {
             const obj = JSON.parse(line);
             const ts = performance.now();
-            if (ts - lastUpdate > 1000) { // Reduce update frequency to once per second
+            if (ts - lastUpdate > STATS_UPDATE_INTERVAL) { // Reduce update frequency to once per second
               lastUpdate = ts;
               updateUsageFromStats(id, obj);
             }
@@ -757,7 +759,7 @@
         }
         
         // Prevent buffer from growing too large (discard old incomplete data)
-        if (buffer.length > 10000) {
+        if (buffer.length > MAX_BUFFER_SIZE) {
           buffer = '';
         }
       }

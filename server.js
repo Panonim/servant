@@ -52,10 +52,11 @@ for (const key of agentEnvKeys) {
   const value = process.env[key];
   if (!value) continue;
   
-  const match = key.match(envAgentPattern);
-  const agentName = match[1].toLowerCase().replace(/_/g, '-');
-  const tokenKey = `AGENT_${match[1]}_TOKEN`;
-  const nameKey = `AGENT_${match[1]}_NAME`;
+  // Extract capture group directly since we already know it matches
+  const agentBaseName = key.slice(6, -4); // Remove 'AGENT_' prefix and '_URL' suffix
+  const agentName = agentBaseName.toLowerCase().replace(/_/g, '-');
+  const tokenKey = `AGENT_${agentBaseName}_TOKEN`;
+  const nameKey = `AGENT_${agentBaseName}_NAME`;
   const token = process.env[tokenKey];
   const displayName = process.env[nameKey] || agentName;
   
