@@ -160,6 +160,24 @@
   // API base for Docker Engine (behind a reverse proxy).
   const API_BASE = (window.__API_BASE__ || '/docker'); // Engine API version; proxy to negotiate newer if needed. [web:10][web:19]
 
+  // Debounce utility for performance optimization
+  function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+      const later = () => {
+        clearTimeout(timeout);
+        func(...args);
+      };
+      clearTimeout(timeout);
+      timeout = setTimeout(later, wait);
+    };
+  }
+  
+  // Performance constants
+  const MAX_BUFFER_SIZE = 10000; // Maximum buffer size for stats stream parsing (bytes)
+  const STATS_UPDATE_INTERVAL = 1000; // Minimum time between stats updates (ms)
+  const CONTAINER_ID_DISPLAY_LENGTH = 12; // Number of characters to show for container IDs
+
   // App state
   let containers = [];
   let agents = [];
@@ -315,6 +333,9 @@
       const data = await fetchJSON(`${API_BASE}/agents`);
       agents = (data.agents || []).filter(a => a.key !== 'local'); // Exclude local from agents list
       
+      // Clear agent name cache when reloading agents
+      clearAgentCache();
+      
       // Load agent colors from agents.json
       try {
         const response = await fetch('/agents.json');
@@ -380,12 +401,29 @@
     return agentsConfig[agentKey]?.color || '#3b82f6';
   }
 
+  // Cache agent names to avoid repeated lookups
+  const agentNameCache = new Map();
+  
   function getAgentName(agentKey) {
     if (agentKey === 'local') {
       return 'Local';
     }
+    
+    // Check cache first
+    if (agentNameCache.has(agentKey)) {
+      return agentNameCache.get(agentKey);
+    }
+    
+    // Lookup and cache
     const agent = agents.find(a => a.key === agentKey);
-    return agent?.name || agentKey;
+    const name = agent?.name || agentKey;
+    agentNameCache.set(agentKey, name);
+    return name;
+  }
+  
+  // Clear cache when agents are reloaded
+  function clearAgentCache() {
+    agentNameCache.clear();
   }
 
 
@@ -395,63 +433,49 @@
     clearErrorState();
     
     try {
-      // Store active stats streams before updating
-      const activeStatsIds = Array.from(statsStreams.keys());
-      
       // Load containers from local and all remote agents
       const containerPromises = [];
+      
+      // Helper function to transform container data - DRY principle
+      const transformContainer = (c, agentKey) => ({
+        id: c.Id,
+        names: c.Names || [],
+        name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0, CONTAINER_ID_DISPLAY_LENGTH),
+        image: c.Image || '',
+        state: c.State || '',
+        status: c.Status || '',
+        ports: c.Ports || [],
+        created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
+        cpu: null,
+        mem: null,
+        memLimit: null,
+        agent: agentKey
+      });
       
       // Always load local containers
       containerPromises.push((async () => {
         try {
           const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=local`);
-          return list.map(c => ({
-            id: c.Id,
-            names: c.Names || [],
-            name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
-            image: c.Image || '',
-            state: c.State || '',
-            status: c.Status || '',
-            ports: c.Ports || [],
-            created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
-            cpu: null,
-            mem: null,
-            memLimit: null,
-            agent: 'local'
-          }));
+          return list.map(c => transformContainer(c, 'local'));
         } catch (error) {
           console.error('Failed to load local containers:', error);
           return [];
         }
       })());
       
-      // Load containers from remote agents
-      agents.forEach(agent => {
-        if (agent.key !== 'local') {
-          containerPromises.push((async () => {
-            try {
-              const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=${agent.key}`);
-              return list.map(c => ({
-                id: c.Id,
-                names: c.Names || [],
-                name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
-                image: c.Image || '',
-                state: c.State || '',
-                status: c.Status || '',
-                ports: c.Ports || [],
-                created: c.Created ? (typeof c.Created === 'number' ? c.Created*1000 : new Date(c.Created).getTime()) : 0,
-                cpu: null,
-                mem: null,
-                memLimit: null,
-                agent: agent.key
-              }));
-            } catch (error) {
-              console.error(`Failed to load containers from agent ${agent.key}:`, error);
-              return [];
-            }
-          })());
-        }
-      });
+      // Load containers from remote agents (filter in advance)
+      const remoteAgents = agents.filter(agent => agent.key !== 'local');
+      for (const agent of remoteAgents) {
+        containerPromises.push((async () => {
+          try {
+            const list = await fetchJSON(`${API_BASE}/containers/json?all=1&agent=${agent.key}`);
+            return list.map(c => transformContainer(c, agent.key));
+          } catch (error) {
+            console.error(`Failed to load containers from agent ${agent.key}:`, error);
+            return [];
+          }
+        })());
+      }
       
       const results = await Promise.all(containerPromises);
       containers = results.flat();
@@ -462,14 +486,18 @@
       // If auto mode is enabled, start stats for running containers
       // BUT respect manual control - don't override user's explicit choices
       if (auto) {
-        containers.filter(c => c.state === 'running').forEach(c => {
-          // Only start stats if:
-          // 1. Stream is not already active
-          // 2. User hasn't manually disabled it
-          if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
-            openStatsStream(c.id, c.agent);
+        // Use for loop for better performance with large arrays
+        for (let i = 0; i < containers.length; i++) {
+          const c = containers[i];
+          if (c.state === 'running') {
+            // Only start stats if:
+            // 1. Stream is not already active
+            // 2. User hasn't manually disabled it
+            if (!statsStreams.has(c.id) && !manualStatsControl.has(c.id)) {
+              openStatsStream(c.id, c.agent);
+            }
           }
-        });
+        }
       }
       
       // Clear error state on successful load
@@ -481,12 +509,20 @@
   }
 
   function updateSummary() {
-    const running = containers.filter(c => c.state==='running').length;
-    const images = new Set(containers.map(c => c.image)).size;
+    let running = 0;
+    const imageSet = new Set();
+    
+    // Single pass through containers for better performance
+    for (let i = 0; i < containers.length; i++) {
+      const c = containers[i];
+      if (c.state === 'running') running++;
+      if (c.image) imageSet.add(c.image);
+    }
+    
     const stopped = containers.length - running;
     elRunning.textContent = running;
     elStopped.textContent = stopped;
-    elImages.textContent = images;
+    elImages.textContent = imageSet.size;
     elUpdated.textContent = timeNow();
   }
 
@@ -521,8 +557,16 @@
     });
   
     // 2. Add new elements and update existing ones
+    // Cache querySelector results to avoid repeated DOM queries
+    const existingElements = new Map();
+    currentElements.forEach(el => {
+      if (newIds.has(el.dataset.id)) {
+        existingElements.set(el.dataset.id, el);
+      }
+    });
+    
     newOrder.forEach((c, index) => {
-      const existingEl = elList.querySelector(`[data-id="${c.id}"]`);
+      const existingEl = existingElements.get(c.id);
       if (existingEl) {
         // Update existing card's content if needed
         updateCard(existingEl, c);
@@ -534,13 +578,14 @@
         // Insert it into the correct position
         const nextEl = elList.children[index];
         elList.insertBefore(newEl, nextEl || null);
+        existingElements.set(c.id, newEl);
       }
     });
   
     // 3. Re-order existing elements to match the new sort order
     newOrder.forEach((c, index) => {
-      const el = elList.querySelector(`[data-id="${c.id}"]`);
-      if (elList.children[index] !== el) {
+      const el = existingElements.get(c.id);
+      if (el && elList.children[index] !== el) {
         elList.insertBefore(el, elList.children[index]);
       }
     });
@@ -621,7 +666,7 @@
               <span>${escapeHTML(c.name)}</span>
               ${!isLocalAgent ? `<span class="agent-name">${escapeHTML(agentName)}</span>` : ''}
             </div>
-            <div class="id">${c.id.slice(0,12)}</div>
+            <div class="id">${c.id.slice(0, CONTAINER_ID_DISPLAY_LENGTH)}</div>
           </div>
           <div class="chips">
             ${c.state && c.state !== 'exited' ? `<span class="chip ${dotClass}" data-chip-type="state">${escapeHTML(c.state)}</span>` : ''}
@@ -684,24 +729,39 @@
       if (!r.ok || !r.body) throw new Error(`stats ${r.status}`);
       const reader = r.body.getReader();
       const decoder = new TextDecoder('utf-8');
-      let buf = ''; let lastUpdate = 0;
+      let buffer = ''; 
+      let lastUpdate = 0;
+      
       while (true) {
         const {done, value} = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, {stream:true});
-        let idx;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx+1);
+        
+        // Optimize buffer handling
+        buffer += decoder.decode(value, {stream:true});
+        
+        // Process complete lines
+        let lineEndIndex;
+        while ((lineEndIndex = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, lineEndIndex).trim();
+          buffer = buffer.slice(lineEndIndex + 1);
+          
           if (!line) continue;
+          
           try {
             const obj = JSON.parse(line);
             const ts = performance.now();
-            if (ts - lastUpdate > 1000) { // Reduce update frequency to once per second
+            if (ts - lastUpdate > STATS_UPDATE_INTERVAL) { // Reduce update frequency to once per second
               lastUpdate = ts;
               updateUsageFromStats(id, obj);
             }
-          } catch {}
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+        
+        // Prevent buffer from growing too large (discard old incomplete data)
+        if (buffer.length > MAX_BUFFER_SIZE) {
+          buffer = '';
         }
       }
     }).catch(() => {
@@ -751,11 +811,25 @@
     const memUsage = s.memory_stats?.usage ?? null;
     const memLimit = s.memory_stats?.limit ?? null;
 
+    // Batch DOM queries for better performance
     const elCPU = document.querySelector(`[data-cpu="${id}"]`);
     const elMem = document.querySelector(`[data-mem="${id}"]`);
-    if (elCPU && cpuPct != null) elCPU.textContent = `${cpuPct.toFixed(1)}%`;
-    if (elMem) elMem.textContent = `${fmtBytes(memUsage)}${memLimit?` / ${fmtBytes(memLimit)}`:''}`;
+    
+    // Update DOM only if elements exist and values have changed
+    if (elCPU && cpuPct != null) {
+      const newText = `${cpuPct.toFixed(1)}%`;
+      if (elCPU.textContent !== newText) {
+        elCPU.textContent = newText;
+      }
+    }
+    if (elMem) {
+      const newText = `${fmtBytes(memUsage)}${memLimit ? ` / ${fmtBytes(memLimit)}` : ''}`;
+      if (elMem.textContent !== newText) {
+        elMem.textContent = newText;
+      }
+    }
 
+    // Update container data
     const idx = containers.findIndex(c => c.id === id);
     if (idx >= 0) {
       containers[idx].cpu = cpuPct;
@@ -855,10 +929,13 @@
   }
 
   // Events
-  elSearch.addEventListener('input', () => {
+  // Debounce search input for better performance
+  const debouncedRender = debounce(() => {
     localStorage.setItem('searchQuery', elSearch.value);
     render();
-  });
+  }, 300);
+  
+  elSearch.addEventListener('input', debouncedRender);
   elAgentFilter.addEventListener('change', () => {
     localStorage.setItem('agentFilter', elAgentFilter.value);
     render();
