@@ -5,10 +5,6 @@ on:
     tags: [ 'v*.*.*' ]
     paths-ignore:
       - 'servant-agent/**'
-  pull_request:
-    branches: [ main, beta ]
-    paths-ignore:
-      - 'servant-agent/**'
 
 env:
   REGISTRY: ghcr.io
