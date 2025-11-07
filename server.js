@@ -489,7 +489,14 @@ api.get('/containers/:id/stats', async (req, res) => {
       }
       closeAll();
     });
-    s.on('error', closeAll);
+    s.on('error', (err) => {
+      logger.error(`Stats stream error for agent ${req._agentKey}:`, err);
+      if (buffer.length > 0) {
+        res.write(buffer.join(''));
+        buffer = [];
+      }
+      closeAll();
+    });
     req.on('close', () => { abort.abort(); closeAll(); });
   } catch (err) {
     clearTimeout(timer);
