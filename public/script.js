@@ -176,6 +176,7 @@
   // Performance constants
   const MAX_BUFFER_SIZE = 10000; // Maximum buffer size for stats stream parsing (bytes)
   const STATS_UPDATE_INTERVAL = 1000; // Minimum time between stats updates (ms)
+  const CONTAINER_ID_DISPLAY_LENGTH = 12; // Number of characters to show for container IDs
 
   // App state
   let containers = [];
@@ -439,7 +440,7 @@
       const transformContainer = (c, agentKey) => ({
         id: c.Id,
         names: c.Names || [],
-        name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0,12),
+        name: (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//,'') : c.Id.slice(0, CONTAINER_ID_DISPLAY_LENGTH),
         image: c.Image || '',
         state: c.State || '',
         status: c.Status || '',
@@ -665,7 +666,7 @@
               <span>${escapeHTML(c.name)}</span>
               ${!isLocalAgent ? `<span class="agent-name">${escapeHTML(agentName)}</span>` : ''}
             </div>
-            <div class="id">${c.id.slice(0,12)}</div>
+            <div class="id">${c.id.slice(0, CONTAINER_ID_DISPLAY_LENGTH)}</div>
           </div>
           <div class="chips">
             ${c.state && c.state !== 'exited' ? `<span class="chip ${dotClass}" data-chip-type="state">${escapeHTML(c.state)}</span>` : ''}

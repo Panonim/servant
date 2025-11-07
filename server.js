@@ -47,13 +47,15 @@ try {
 // This allows defining agents in docker-compose without agents.json
 // Optimize by pre-filtering environment variables instead of checking all of them
 const envAgentPattern = /^AGENT_(.+)_URL$/;
+const AGENT_PREFIX = 'AGENT_';
+const URL_SUFFIX = '_URL';
 const agentEnvKeys = Object.keys(process.env).filter(key => envAgentPattern.test(key));
 for (const key of agentEnvKeys) {
   const value = process.env[key];
   if (!value) continue;
   
   // Extract capture group directly since we already know it matches
-  const agentBaseName = key.slice(6, -4); // Remove 'AGENT_' prefix and '_URL' suffix
+  const agentBaseName = key.slice(AGENT_PREFIX.length, -URL_SUFFIX.length);
   const agentName = agentBaseName.toLowerCase().replace(/_/g, '-');
   const tokenKey = `AGENT_${agentBaseName}_TOKEN`;
   const nameKey = `AGENT_${agentBaseName}_NAME`;
@@ -438,6 +440,7 @@ api.get('/containers/:id/stats', async (req, res) => {
     };
     
     // Use array buffer for better performance with large streams
+    const BUFFER_BATCH_SIZE = 5; // Number of items to batch before writing
     let buffer = [];
     
     s.on('data', (chunk) => {
@@ -466,7 +469,7 @@ api.get('/containers/:id/stats', async (req, res) => {
             
             // Use buffering to reduce write calls
             buffer.push(jsonStr);
-            if (buffer.length >= 5) {
+            if (buffer.length >= BUFFER_BATCH_SIZE) {
               const combined = buffer.join('');
               buffer = [];
               res.write(combined);

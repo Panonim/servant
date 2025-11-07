@@ -231,6 +231,7 @@ api.get('/containers/:id/stats', async (req, res) => {
     };
     
     // Use array buffer for better performance with large streams
+    const BUFFER_BATCH_SIZE = 5; // Number of items to batch before writing
     let buffer = [];
     
     const onData = (chunk) => {
@@ -256,7 +257,7 @@ api.get('/containers/:id/stats', async (req, res) => {
             
             // Use buffering to reduce write calls
             buffer.push(jsonStr);
-            if (buffer.length >= 5) {
+            if (buffer.length >= BUFFER_BATCH_SIZE) {
               const combined = buffer.join('');
               buffer = [];
               // Pause stream if buffer is full, resume on drain
