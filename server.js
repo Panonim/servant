@@ -28,11 +28,17 @@ try {
   const agentsFile = path.join(__dirname, 'agents.json');
   const agentsData = await readFile(agentsFile, 'utf8');
   // Replace environment variable placeholders
-  const replaced = agentsData.replace(/\$\{(\w+)\}/g, (_, varName) => process.env[varName] || '');
+  const replaced = agentsData.replace(/\$\{(\w+)\}/g, (_, varName) => {
+    const value = process.env[varName];
+    if (value === undefined) {
+      console.warn(`[WARN] Missing environment variable '${varName}' referenced in agents.json`);
+    }
+    return value || '';
+  });
   const remoteAgentsConfig = JSON.parse(replaced);
   
   // Merge remote agents with local agent
-  if (remoteAgentsConfig.agents) {
+  if (remoteAgentsConfig.agents && typeof remoteAgentsConfig.agents === 'object') {
     agentsConfig.agents = {
       ...agentsConfig.agents,
       ...remoteAgentsConfig.agents
@@ -40,7 +46,11 @@ try {
     console.log(`[INFO] Loaded ${Object.keys(remoteAgentsConfig.agents).length} remote agent(s) from agents.json`);
   }
 } catch (err) {
-  console.log('[INFO] No agents.json found or error loading it, using local agent only');
+  if (err.code === 'ENOENT') {
+    console.log('[INFO] No agents.json found, using local agent only');
+  } else {
+    console.error('[ERROR] Failed to load or parse agents.json:', err);
+  }
 }
 
 // Load agents from environment variables (AGENT_NAME_URL and AGENT_NAME_TOKEN pattern)
@@ -96,21 +106,47 @@ function getDockerClient(agentKey) {
       _token: agent.token,
       listContainers: async (opts) => {
         const url = `${agent.url}/api/containers/json?all=${opts.all ? 1 : 0}`;
-        const response = await fetch(url, {
-          headers: { 'Authorization': `Bearer ${agent.token}` }
-        });
-        if (!response.ok) throw new Error(`Agent ${agentKey}: HTTP ${response.status}`);
-        return response.json();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15_000); // 15s timeout
+        try {
+          const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${agent.token}` },
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            const text = await response.text().catch(() => `HTTP ${response.status}`);
+            throw new Error(`Agent ${agentKey}: ${text}`);
+          }
+          return response.json();
+        } catch (err) {
+          if (err.name === 'AbortError') throw new Error(`Agent ${agentKey}: Request timed out`);
+          throw err;
+        } finally {
+          clearTimeout(timeout);
+        }
       },
       getContainer: (id) => ({
         stats: async (opts) => {
           const url = `${agent.url}/api/containers/${id}/stats?stream=${opts.stream ? 1 : 0}`;
-          const response = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${agent.token}` },
-            signal: opts.signal
-          });
-          if (!response.ok) throw new Error(`Agent ${agentKey}: HTTP ${response.status}`);
-          return opts.stream ? response.body : response.json();
+          const controller = new AbortController();
+          // Use a longer timeout for streams
+          const timeout = setTimeout(() => controller.abort(), (opts.stream ? STREAM_MAX_MS : 15_000));
+          try {
+            const response = await fetch(url, {
+              headers: { 'Authorization': `Bearer ${agent.token}` },
+              signal: opts.signal || controller.signal,
+            });
+            if (!response.ok) {
+              const text = await response.text().catch(() => `HTTP ${response.status}`);
+              throw new Error(`Agent ${agentKey}: ${text}`);
+            }
+            return opts.stream ? response.body : response.json();
+          } catch (err) {
+            if (err.name === 'AbortError') throw new Error(`Agent ${agentKey}: Request timed out`);
+            throw err;
+          } finally {
+            clearTimeout(timeout);
+          }
         }
       })
     };
@@ -228,7 +264,7 @@ function requireApiKey(req, res, next) {
 // Helpers
 // Accept Docker IDs: 12 (short) to 64 hex characters; reject other forms to avoid path traversal or names with slashes.
 const isSafeId = (v) => typeof v === 'string' && /^[0-9a-fA-F]{12,64}$/.test(v);
-const clampAll = (v) => (v === '1' || v === 'true');
+const parseBooleanQuery = (v) => (v === '1' || String(v).toLowerCase() === 'true');
 const safeErr = (err) => ({ error: err?.json?.message || err?.message || 'Internal error' });
 
 // Read-only Engine proxy
@@ -239,24 +275,37 @@ app.get('/healthz', (_, res) => res.type('text/plain').send('ok'));
 // Middleware to parse agent from query/header
 api.use((req, res, next) => {
   const agentKey = req.query.agent || req.headers['x-agent'] || 'local';
-  if (!agentsConfig.agents?.[agentKey]) {
-    return res.status(400).json({ error: `Unknown agent: ${agentKey}` });
+  try {
+    // This will throw if agent is unknown or misconfigured
+    getDockerClient(agentKey);
+    req._agentKey = agentKey;
+    next();
+  } catch (err) {
+    logger.error(`Failed to get Docker client for agent '${agentKey}':`, err.message);
+    return res.status(400).json({ error: `Invalid or misconfigured agent: ${agentKey}` });
   }
-  req._agentKey = agentKey;
-  next();
 });
 
 // API routes
 app.use('/docker', api);
 
 // Serve agents.json for frontend to read colors
-app.get('/agents.json', async (req, res) => {
+app.get('/agents.json', requireApiKey, async (req, res) => {
   try {
     const agentsFile = path.join(__dirname, 'agents.json');
     const agentsData = await readFile(agentsFile, 'utf8');
-    res.type('application/json').send(agentsData);
+    const config = JSON.parse(agentsData);
+    // Strip sensitive fields before sending to client
+    if (config.agents) {
+      for (const key in config.agents) {
+        delete config.agents[key].token;
+        delete config.agents[key].socketPath;
+      }
+    }
+    res.json(config);
   } catch (err) {
-    // Return empty agents if file doesn't exist
+    // Return empty agents if file doesn't exist or is invalid
+    if (err.code !== 'ENOENT') logger.error('Could not serve agents.json:', err);
     res.json({ agents: {} });
   }
 });
@@ -264,7 +313,8 @@ app.get('/agents.json', async (req, res) => {
 // Cache script.js content in memory for performance
 let cachedScriptContent = null;
 async function getCachedScriptContent() {
-  if (!cachedScriptContent) {
+  // In development, always re-read the file to allow for live changes.
+  if (process.env.NODE_ENV !== 'production' || !cachedScriptContent) {
     const scriptPath = path.join(__dirname, 'public', 'script.js');
     cachedScriptContent = await readFile(scriptPath, 'utf8');
   }
@@ -344,7 +394,7 @@ api.get('/agents', (req, res) => {
 // GET /containers/json?all=1&agent=remote-agent-1
 api.get('/containers/json', async (req, res) => {
   try {
-    const all = clampAll(String(req.query.all ?? '1'));
+    const all = parseBooleanQuery(String(req.query.all ?? '1'));
     const client = getDockerClient(req._agentKey);
     const list = await client.listContainers({ all });
     // Filter container list to only include necessary fields
@@ -413,19 +463,46 @@ api.get('/containers/:id/stats', async (req, res) => {
       const closeAll = () => {
         clearTimeout(timer);
         try { reader.cancel(); } catch {}
-        try { res.end(); } catch {}
+        if (!res.writableEnded) res.end();
       };
       
       req.on('close', () => { abort.abort(); closeAll(); });
       
       try {
+        let buffer = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          res.write(value);
+          
+          // Similar to local stream, process NDJSON frames
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // Keep partial line
+          
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const frame = JSON.parse(line);
+              const filtered = {
+                read: frame.read,
+                preread: frame.preread,
+                cpu_stats: frame.cpu_stats,
+                precpu_stats: frame.precpu_stats,
+                memory_stats: frame.memory_stats,
+                networks: frame.networks,
+                name: frame.name,
+                id: frame.id
+              };
+              res.write(JSON.stringify(filtered) + '\n');
+            } catch (e) {
+              // Ignore partial/invalid JSON frames
+            }
+          }
         }
       } catch (e) {
-        logger.error(`Error streaming stats from agent ${req._agentKey}:`, e);
+        if (e.name !== 'AbortError') {
+          logger.error(`Error streaming stats from agent ${req._agentKey}:`, e);
+        }
       } finally {
         closeAll();
       }
@@ -491,11 +568,16 @@ api.get('/containers/:id/stats', async (req, res) => {
     });
     s.on('error', (err) => {
       logger.error(`Stats stream error for agent ${req._agentKey}:`, err);
-      if (buffer.length > 0) {
-        res.write(buffer.join(''));
-        buffer = [];
+      try {
+        if (buffer.length > 0) {
+          res.write(buffer.join(''));
+        }
+      } catch (writeErr) {
+        logger.debug('Failed to flush buffer on stream error:', writeErr);
+      } finally {
+        buffer = []; // Always clear buffer
+        closeAll();
       }
-      closeAll();
     });
     req.on('close', () => { abort.abort(); closeAll(); });
   } catch (err) {
@@ -506,9 +588,17 @@ api.get('/containers/:id/stats', async (req, res) => {
   }
 });
 
-// SPA fallback - catch any unmatched routes
-app.use('*', (_, res) => {
+// SPA fallback - catch any unmatched routes and send to index.html
+// This should be after all other routes
+app.get('*', (req, res, next) => {
+  // Let API 404s fall through to the error handler
+  if (req.path.startsWith('/docker/')) return next();
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Final 404 handler for API routes
+api.use((req, res) => {
+  res.status(404).json({ error: `Not Found: ${req.method} ${req.originalUrl}` });
 });
 
 // Timeouts and robust startup
@@ -539,8 +629,13 @@ server.requestTimeout = 30_000;
 server.keepAliveTimeout = 60_000;
 
 // Track open connections
+let isShuttingDown = false;
 const connections = new Set();
 server.on('connection', (socket) => {
+  if (isShuttingDown) {
+    socket.destroy();
+    return;
+  }
   connections.add(socket);
   socket.on('close', () => connections.delete(socket));
 });
@@ -549,6 +644,8 @@ const KA_MS = Number(process.env.KEEP_ALIVE_MS || 10_000);
 server.keepAliveTimeout = Math.min(server.keepAliveTimeout, KA_MS);
 
 function shutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   const graceMs = Number(process.env.SHUTDOWN_GRACE_MS || 1500);
   logger.info(`${signal} received. Shutting down gracefully (<= ${graceMs}ms)...`);
 
